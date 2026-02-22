@@ -13,9 +13,87 @@ interface ImageResult {
   year?: number;
   date?: string;
   isHistorical?: boolean;
+  lat?: number;
+  lng?: number;
 }
 
 const USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
+
+// Filter out non-photos (icons, illustrations, logos, etc.)
+function isLikelyPhoto(url: string, title: string, width?: number, height?: number): boolean {
+  const urlLower = url.toLowerCase();
+  const titleLower = title.toLowerCase();
+  
+  // Reject based on URL patterns
+  const rejectUrlPatterns = [
+    'icon', 'logo', 'avatar', 'badge', 'button', 'sprite',
+    'thumbnail_placeholder', 'placeholder', 'loading',
+    'banner', 'ad_', 'advertisement', 'promo',
+    '/assets/', '/icons/', '/logos/', '/ui/',
+    'emoji', 'emoticon', 'smiley',
+    'clipart', 'vector', 'illustration',
+    '1x1', 'pixel', 'spacer', 'blank',
+    'favicon', 'apple-touch', 'android-chrome',
+  ];
+  
+  for (const pattern of rejectUrlPatterns) {
+    if (urlLower.includes(pattern)) return false;
+  }
+  
+  // Reject based on title patterns
+  const rejectTitlePatterns = [
+    'icon', 'logo', 'vector', 'illustration', 'clipart',
+    'diagram', 'chart', 'graph', 'infographic',
+    'template', 'mockup', 'wireframe',
+  ];
+  
+  for (const pattern of rejectTitlePatterns) {
+    if (titleLower.includes(pattern)) return false;
+  }
+  
+  // Reject tiny images (likely icons/thumbnails)
+  if (width && height) {
+    if (width < 100 || height < 100) return false;
+    // Reject extremely long/thin images (likely banners)
+    const ratio = width / height;
+    if (ratio > 5 || ratio < 0.2) return false;
+  }
+  
+  // Reject SVG (usually icons/illustrations)
+  if (urlLower.endsWith('.svg')) return false;
+  
+  // Reject GIF (often animations/icons, not photos)
+  if (urlLower.endsWith('.gif')) return false;
+  
+  return true;
+}
+
+// Filter an array of images
+function filterPhotosOnly(images: ImageResult[]): ImageResult[] {
+  return images.filter(img => isLikelyPhoto(img.url, img.title, img.width, img.height));
+}
+
+// Geocode a location string to lat/lng
+async function geocodeLocation(location: string): Promise<{ lat: number; lng: number } | null> {
+  try {
+    // Use Nominatim (OpenStreetMap) for geocoding - free, no API key
+    const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(location)}&format=json&limit=1`;
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'LocationSpy/1.0' },
+    });
+    const data = await res.json();
+    
+    if (data && data.length > 0) {
+      return {
+        lat: parseFloat(data[0].lat),
+        lng: parseFloat(data[0].lon),
+      };
+    }
+  } catch (error) {
+    console.error('Geocoding failed:', error);
+  }
+  return null;
+}
 
 // Scrape Google Images
 async function scrapeGoogleImages(query: string): Promise<ImageResult[]> {
@@ -128,10 +206,17 @@ async function scrapeBingImages(query: string): Promise<ImageResult[]> {
   }
 }
 
-// Scrape Flickr (public search page)
-async function scrapeFlickr(query: string): Promise<ImageResult[]> {
+// Scrape Flickr with geo-search support
+async function scrapeFlickr(query: string, lat?: number, lng?: number, radius?: number): Promise<ImageResult[]> {
   try {
-    const searchUrl = `https://www.flickr.com/search/?text=${encodeURIComponent(query)}&safe_search=1`;
+    // If we have coordinates, use geo-search
+    let searchUrl: string;
+    if (lat && lng) {
+      const r = radius || 5; // Default 5km radius
+      searchUrl = `https://www.flickr.com/search/?lat=${lat}&lon=${lng}&radius=${r}&text=${encodeURIComponent(query)}&safe_search=1&sort=relevance`;
+    } else {
+      searchUrl = `https://www.flickr.com/search/?text=${encodeURIComponent(query)}&safe_search=1`;
+    }
     
     const res = await fetch(searchUrl, {
       headers: {
@@ -649,6 +734,9 @@ export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const location = searchParams.get('location');
   const sourcesParam = searchParams.get('sources') || 'google,bing,flickr,unsplash,loc,wikimedia,archive';
+  const geoSearch = searchParams.get('geoSearch') === 'true';
+  const photosOnly = searchParams.get('photosOnly') !== 'false'; // Default true
+  const radius = parseInt(searchParams.get('radius') || '10'); // km
 
   if (!location) {
     return NextResponse.json({ error: 'Location is required' }, { status: 400 });
@@ -657,15 +745,27 @@ export async function GET(request: Request) {
   const sources = sourcesParam.split(',');
   const searchPromises: Promise<ImageResult[]>[] = [];
 
+  // Geocode the location if geo-search is enabled
+  let coordinates: { lat: number; lng: number } | null = null;
+  if (geoSearch) {
+    coordinates = await geocodeLocation(location);
+  }
+
   // Queue up searches for each source
   if (sources.includes('google')) {
-    searchPromises.push(scrapeGoogleImages(location));
+    // Add "photo" to query to prefer photos over illustrations
+    searchPromises.push(scrapeGoogleImages(location + ' photo'));
   }
   if (sources.includes('bing')) {
-    searchPromises.push(scrapeBingImages(location));
+    searchPromises.push(scrapeBingImages(location + ' photo'));
   }
   if (sources.includes('flickr')) {
-    searchPromises.push(scrapeFlickr(location));
+    // Flickr supports geo-search
+    if (coordinates) {
+      searchPromises.push(scrapeFlickr(location, coordinates.lat, coordinates.lng, radius));
+    } else {
+      searchPromises.push(scrapeFlickr(location));
+    }
   }
   if (sources.includes('unsplash')) {
     searchPromises.push(scrapeUnsplash(location));
@@ -694,7 +794,12 @@ export async function GET(request: Request) {
 
   try {
     const results = await Promise.all(searchPromises);
-    const allImages = results.flat();
+    let allImages = results.flat();
+
+    // Filter to photos only (remove icons, illustrations, etc.)
+    if (photosOnly) {
+      allImages = filterPhotosOnly(allImages);
+    }
 
     // Remove duplicates based on URL
     const seen = new Set<string>();
@@ -712,6 +817,8 @@ export async function GET(request: Request) {
       images: shuffled,
       count: shuffled.length,
       sources: [...new Set(shuffled.map(img => img.source))],
+      coordinates: coordinates,
+      geoSearchEnabled: geoSearch,
     });
   } catch (error) {
     console.error('Search failed:', error);

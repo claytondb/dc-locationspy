@@ -46,18 +46,26 @@ export default function Home() {
   const [activeSources, setActiveSources] = useState<ImageSource[]>(['google', 'bing', 'flickr', 'unsplash', 'loc', 'wikimedia', 'archive']);
   const [selectedSource, setSelectedSource] = useState<ImageSource | 'all' | 'historical'>('all');
   const [viewMode, setViewMode] = useState<ViewMode>('grid');
+  const [geoSearch, setGeoSearch] = useState(true);
+  const [geoRadius, setGeoRadius] = useState(10); // km
+  const [photosOnly, setPhotosOnly] = useState(true);
+  const [usedCoordinates, setUsedCoordinates] = useState<{ lat: number; lng: number } | null>(null);
 
   const handleSearch = async (location: string, coordinates?: { lat: number; lng: number }) => {
     setLoading(true);
     setError(null);
     setImages([]);
     setSearchedLocation(location);
+    setUsedCoordinates(null);
 
     try {
       const params = new URLSearchParams({
         location,
         sources: activeSources.join(','),
         safeSearch: 'true',
+        geoSearch: geoSearch.toString(),
+        photosOnly: photosOnly.toString(),
+        radius: geoRadius.toString(),
       });
       
       if (coordinates) {
@@ -74,6 +82,11 @@ export default function Home() {
       }
 
       setImages(data.images || []);
+      
+      // Store coordinates if geo-search was used
+      if (data.coordinates) {
+        setUsedCoordinates(data.coordinates);
+      }
       
       // Auto-switch to timeline if we have historical images
       const hasHistorical = (data.images || []).some((img: ImageResult) => img.isHistorical || img.year);
@@ -135,6 +148,61 @@ export default function Home() {
             }}
             sourceLabels={SOURCE_LABELS}
           />
+        </div>
+
+        {/* Search Options */}
+        <div className="card mb-6">
+          <h3 className="text-sm font-medium text-[var(--muted)] mb-3">🔧 Search Options</h3>
+          <div className="flex flex-wrap gap-6">
+            {/* Photos Only Toggle */}
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={photosOnly}
+                onChange={(e) => setPhotosOnly(e.target.checked)}
+                className="w-4 h-4 rounded accent-[var(--accent)]"
+              />
+              <span className="text-sm">Photos only</span>
+              <span className="text-xs text-[var(--muted)]">(filter out icons/illustrations)</span>
+            </label>
+
+            {/* Geo-Search Toggle */}
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={geoSearch}
+                onChange={(e) => setGeoSearch(e.target.checked)}
+                className="w-4 h-4 rounded accent-[var(--accent)]"
+              />
+              <span className="text-sm">Geo-search</span>
+              <span className="text-xs text-[var(--muted)]">(search by coordinates)</span>
+            </label>
+
+            {/* Radius Selector (only show if geo-search is on) */}
+            {geoSearch && (
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-[var(--muted)]">Radius:</span>
+                <select
+                  value={geoRadius}
+                  onChange={(e) => setGeoRadius(parseInt(e.target.value))}
+                  className="bg-[var(--background)] border border-[var(--border)] rounded px-2 py-1 text-sm"
+                >
+                  <option value="1">1 km</option>
+                  <option value="5">5 km</option>
+                  <option value="10">10 km</option>
+                  <option value="25">25 km</option>
+                  <option value="50">50 km</option>
+                </select>
+              </div>
+            )}
+          </div>
+
+          {/* Show coordinates if geo-search was used */}
+          {usedCoordinates && (
+            <div className="mt-3 text-xs text-[var(--muted)]">
+              📍 Searching near: {usedCoordinates.lat.toFixed(4)}, {usedCoordinates.lng.toFixed(4)}
+            </div>
+          )}
         </div>
 
         {/* Error State */}
